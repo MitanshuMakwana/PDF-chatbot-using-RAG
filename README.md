@@ -213,51 +213,6 @@ http://127.0.0.1:8000
 
 ---
 
-## Example Questions
-
-```text
-Summarize the document.
-
-What are the key responsibilities mentioned?
-
-What technologies are discussed?
-
-Explain section 3.
-```
-
----
-
-## Future Improvements
-
-- Multiple document support
-- PDF preview
-- Source citations
-- Chat history
-- User authentication
-- Document deletion
-- Streaming responses
-- Docker deployment
-
----
-
-## Learning Outcomes
-
-This project demonstrates:
-
-- Retrieval-Augmented Generation (RAG)
-- Vector Databases
-- Embeddings
-- Semantic Search
-- Large Language Models
-- FastAPI Development
-- AI Application Development
-
----
-
 ## Author
 
 Mitanshu Makwana
-
-Information Technology Engineering
-
-LDRP Institute of Technology and Research
