@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+
+    <!-- LEFT PANEL -->
+    <div class="left-panel">
+
+        <h2>Documents</h2>
+
+        <input type="file" id="fileInput" accept=".pdf">
+
+        <button onclick="uploadFile()">Upload PDF</button>
+
+        <p id="uploadStatus"></p>
+
+        <h3>Uploaded Files</h3>
+
+        <ul id="documentList"></ul>
+
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="right-panel">
+
+        <div id="chatMessages" class="chat-messages">
+
+            <div class="bot-message">
+                Upload a PDF and ask questions about it.
+            </div>
+
+        </div>
+
+        <div class="chat-box">
+
+            <input
+                type="text"
+                id="question"
+                placeholder="Ask a question..."
+            >
+
+            <button onclick="askQuestion()">
+                Send
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+<script src="/static/script.js"></script>
+
+</body>
+</html>
