@@ -59,7 +59,7 @@ async def upload(file: UploadFile = File(...)):
 
     if not allowed_file(file.filename):
         raise HTTPException(
-            status_code=400, detail="Only .pdf, .txt, and .md files are supported"
+            status_code=400, detail="Only .pdf is supported"
         )
 
     filepath = os.path.join(UPLOAD_DIR, file.filename)
