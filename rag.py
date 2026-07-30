@@ -5,6 +5,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 
@@ -64,26 +65,40 @@ class RAGAssistant:
             return []
 
     def query(self, question, filter_source=None):
+        # RELEVANCE_THRESHOLD = 0.5
+
         if filter_source:
-            docs = self.db.max_marginal_relevance_search(
+            docs_scores = self.db.similarity_search_with_relevance_scores(
                 question,
                 k=6,
-                fetch_k=20,
                 filter={"source": filter_source}
             )
         else:
-            docs = self.db.max_marginal_relevance_search(
+            docs_scores = self.db.similarity_search_with_relevance_scores(
                 question,
-                k=6,
-                fetch_k=20
+                k=6
             )
+
+        # Debug scores
+        for doc, score in docs_scores:
+            print(
+                f"score={score:.3f} | "
+                f"source={doc.metadata.get('source')} | "
+                f"{doc.page_content[:80]}"
+            )
+
+        docs = [
+            doc
+            for doc, score in docs_scores
+            # if score >= RELEVANCE_THRESHOLD
+        ]
 
         if not docs:
             return {
-                "answer": "No documents found.",
+                "answer": "No relevant documents found.",
                 "sources": []
             }
-        
+            
         # DEBUG: Print retrieved chunks
         for i, doc in enumerate(docs, 1):
             print("\n" + "=" * 60)
@@ -103,32 +118,81 @@ class RAGAssistant:
                 f"[Excerpt {i} | Source: {source_name} | Page: {page_num}]\n{doc.page_content}"
             )
 
-        context = "\n\n---\n\n".join(context_blocks)    
+        # context = "\n\n---\n\n".join(context_blocks)    
 
-        # context = "\n\n".join(
-        #     doc.page_content for doc in docs
-        # )
-
-        prompt = f"""
-        You are a document question-answering assistant.
+        context = "\n\n".join(
+            doc.page_content for doc in docs
+        )
+        
+        system_prompt = """
+        You are a professional document assistant.
 
         Rules:
-        1. Answer naturally in fluent English.
-        2. Do not mention document names, file names, source names, chunk numbers, or page numbers unless the user explicitly asks for them.
-        3. Write concise but informative answers.
-        4. Use only the provided context.
-        5. If information is missing, say so politely.
-        Context:
-        {context}
+        - Answer only using the provided information.
+        - Never mention documents, sources, context, excerpts, page numbers, or file names.
+        - Write naturally and professionally.
+        - Do not use markdown bullet style with '*' characters.
+        - Use proper spacing and formatting for readability.
 
-        Question:
-        {question}
+        Formatting Guidelines:
 
-        Answer:
+        1. If information belongs to categories, present it in sections.
+
+        Example:
+
+        **Languages**
+        - Python
+        - SQL
+        - JavaScript
+
+        **Databases**
+        - MySQL
+        - MongoDB
+
+        **Cloud**
+        - AWS
+
+        2. If the answer contains attributes and values, use:
+
+        **Name:** John Doe
+        **Email:** john@example.com
+        **Role:** Data Engineer
+
+        3. If the user asks multiple questions, answer each separately.
+
+        Example:
+
+        **Total Projects:** 3
+
+        **Project Explanation**
+
+        Dermalens is a skin cancer detection system that uses deep learning to classify skin lesions as benign or malignant.
+
+        4. For summaries:
+        - Use short paragraphs.
+        - Organize information logically.
+        - Use headings when appropriate.
+
+        5. For lists:
+        - Use numbered lists when order matters.
+        - Use dash (-) lists when order does not matter.
+
+        6. If information is missing, state that clearly and briefly without guessing.
+
+        Always prefer clean, structured, professional formatting over long unformatted paragraphs.
         """
 
-        response = self.llm.invoke(prompt)
-        
+        human_prompt = f"""Context:
+                {context}
+
+        Question:
+        {question}"""
+
+        response = self.llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt),
+        ])
+
         # Collect unique sources
         unique_sources = {}
         for doc in docs:
@@ -146,8 +210,54 @@ class RAGAssistant:
             }
             for src, pages in unique_sources.items()
         ]
+        
+        print(response.content)
 
         return {
             "answer": response.content,
             "sources": sources_summary
         }
+
+        # prompt = f"""
+        # You are a helpful assistant that answers questions using only the context provided below.
+
+        # Guidelines:
+        # - Answer naturally, as if you already know this information — never refer to "the document," "the context," "excerpts," "sources," page numbers, or file names.
+        # - Be thorough and clear. Where useful, explain concepts, give examples, or restructure information (e.g. as steps or a short list) rather than just copying phrasing from the context.
+        # - If the answer isn't in the context, say so briefly and naturally — don't guess.
+        # - Do not reference where the information came from in any way.
+        
+        
+        # Context:
+        # {context}
+
+        # Question:
+        # {question}
+
+        # Answer:
+        # """
+
+        # response = self.llm.invoke(prompt)
+        
+        # # Collect unique sources
+        # unique_sources = {}
+        # for doc in docs:
+        #     src = doc.metadata.get("source", "Unknown")
+        #     page = doc.metadata.get("page", None)
+        #     if src not in unique_sources:
+        #         unique_sources[src] = set()
+        #     if page is not None:
+        #         unique_sources[src].add(page)
+
+        # sources_summary = [
+        #     {
+        #         "source": src,
+        #         "pages": sorted(list(pages)) if pages else "N/A"
+        #     }
+        #     for src, pages in unique_sources.items()
+        # ]
+
+        # return {
+        #     "answer": response.content,
+        #     "sources": sources_summary
+        # }
