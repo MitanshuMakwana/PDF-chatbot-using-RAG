@@ -138,7 +138,7 @@ async function askQuestion() {
 
         chat.innerHTML += `
             <div class="bot-message">
-                ${data.answer}
+                ${marked.parse(data.answer)}
             </div>
         `;
 
