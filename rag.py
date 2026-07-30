@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -22,23 +22,27 @@ class RAGAssistant:
 
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
-            temperature=0,
+            temperature=0.6,
+            top_p=0.9,
         )
 
     def add_document(self, filepath, filename):
-        loader = PyPDFLoader(filepath)
+        loader = PyMuPDFLoader(filepath)
         documents = loader.load()
 
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3000,
-            chunk_overlap=300
+            chunk_size=1200,
+            chunk_overlap=300,
+            separators=["\n\n", "\n", ".", " ", ""]
         )
 
         chunks = splitter.split_documents(documents)
-        chunks = chunks[:100]
 
         for chunk in chunks:
             chunk.metadata["source"] = filename
+            
+            if "page" in chunk.metadata:
+                chunk.metadata["page"] += 1
 
         self.db.add_documents(chunks)
 
@@ -59,44 +63,91 @@ class RAGAssistant:
         except Exception:
             return []
 
-    def query(self, question):
-        docs = self.db.similarity_search(question, k=4)
+    def query(self, question, filter_source=None):
+        if filter_source:
+            docs = self.db.max_marginal_relevance_search(
+                question,
+                k=6,
+                fetch_k=20,
+                filter={"source": filter_source}
+            )
+        else:
+            docs = self.db.max_marginal_relevance_search(
+                question,
+                k=6,
+                fetch_k=20
+            )
 
         if not docs:
             return {
                 "answer": "No documents found.",
                 "sources": []
             }
+        
+        # DEBUG: Print retrieved chunks
+        for i, doc in enumerate(docs, 1):
+            print("\n" + "=" * 60)
+            print(f"Chunk {i}")
+            print(f"Source: {doc.metadata.get('source')}")
+            print(f"Page: {doc.metadata.get('page')}")
+            print(doc.page_content[:500])
 
-        context = "\n\n".join(
-            doc.page_content for doc in docs
-        )
+        context_blocks = []
+            
+        # Format context with chunk details
+        context_blocks = []
+        for i, doc in enumerate(docs, start=1):
+            source_name = doc.metadata.get("source", "Unknown")
+            page_num = doc.metadata.get("page", "N/A")
+            context_blocks.append(
+                f"[Excerpt {i} | Source: {source_name} | Page: {page_num}]\n{doc.page_content}"
+            )
+
+        context = "\n\n---\n\n".join(context_blocks)    
+
+        # context = "\n\n".join(
+        #     doc.page_content for doc in docs
+        # )
 
         prompt = f"""
-Answer ONLY from the provided context.
+        You are a document question-answering assistant.
 
-If the answer is not present in the context,
-say "I could not find that information in the document."
+        Rules:
+        1. Answer naturally in fluent English.
+        2. Do not mention document names, file names, source names, chunk numbers, or page numbers unless the user explicitly asks for them.
+        3. Write concise but informative answers.
+        4. Use only the provided context.
+        5. If information is missing, say so politely.
+        Context:
+        {context}
 
-Context:
-{context}
+        Question:
+        {question}
 
-Question:
-{question}
-"""
+        Answer:
+        """
 
         response = self.llm.invoke(prompt)
-
-        sources = []
-
+        
+        # Collect unique sources
+        unique_sources = {}
         for doc in docs:
-            sources.append(
-                {
-                    "source": doc.metadata.get("source", "Unknown")
-                }
-            )
+            src = doc.metadata.get("source", "Unknown")
+            page = doc.metadata.get("page", None)
+            if src not in unique_sources:
+                unique_sources[src] = set()
+            if page is not None:
+                unique_sources[src].add(page)
+
+        sources_summary = [
+            {
+                "source": src,
+                "pages": sorted(list(pages)) if pages else "N/A"
+            }
+            for src, pages in unique_sources.items()
+        ]
 
         return {
             "answer": response.content,
-            "sources": sources
+            "sources": sources_summary
         }
