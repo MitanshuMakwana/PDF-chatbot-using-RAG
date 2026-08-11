@@ -1,4 +1,6 @@
 import os
+import re
+
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -8,6 +10,26 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
+
+
+def format_answer(text: str) -> str:
+    """Normalize LLM markdown so sections and lists render cleanly."""
+    if not text:
+        return text
+
+    text = text.strip()
+
+    # Put block headings on their own line when the model runs them inline.
+    text = re.sub(r"([^\n])\s*(\*\*[^*\n]+:\*\*)", r"\1\n\n\2", text)
+    text = re.sub(r"(\*\*[^*\n]+\*\*)\s*-\s+", r"\1\n\n- ", text)
+
+    # Convert inline dash lists into one item per line.
+    text = re.sub(r"(?<!\n)\s+-\s+(?=[A-Za-z0-9])", "\n- ", text)
+
+    # Collapse excessive blank lines.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
 
 
 class RAGAssistant:
@@ -23,7 +45,7 @@ class RAGAssistant:
 
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
-            temperature=0.6,
+            temperature=0.4,
             top_p=0.9,
         )
 
@@ -64,14 +86,19 @@ class RAGAssistant:
         except Exception:
             return []
 
-    def query(self, question, filter_source=None):
+    def query(self, question, filter_sources=None):
         # RELEVANCE_THRESHOLD = 0.5
 
-        if filter_source:
+        if filter_sources:
+            if len(filter_sources) == 1:
+                chroma_filter = {"source": filter_sources[0]}
+            else:
+                chroma_filter = {"source": {"$in": filter_sources}}
+
             docs_scores = self.db.similarity_search_with_relevance_scores(
                 question,
-                k=6,
-                filter={"source": filter_source}
+                k=min(6 * len(filter_sources), 12),
+                filter=chroma_filter,
             )
         else:
             docs_scores = self.db.similarity_search_with_relevance_scores(
@@ -107,86 +134,62 @@ class RAGAssistant:
             print(f"Page: {doc.metadata.get('page')}")
             print(doc.page_content[:500])
 
-        context_blocks = []
-            
-        # Format context with chunk details
-        context_blocks = []
-        for i, doc in enumerate(docs, start=1):
-            source_name = doc.metadata.get("source", "Unknown")
-            page_num = doc.metadata.get("page", "N/A")
-            context_blocks.append(
-                f"[Excerpt {i} | Source: {source_name} | Page: {page_num}]\n{doc.page_content}"
-            )
-
-        # context = "\n\n---\n\n".join(context_blocks)    
-
-        context = "\n\n".join(
+        context = "\n\n---\n\n".join(
             doc.page_content for doc in docs
         )
-        
-        system_prompt = """
-        You are a professional document assistant.
 
-        Rules:
-        - Answer only using the provided information.
-        - Never mention documents, sources, context, excerpts, page numbers, or file names.
-        - Write naturally and professionally.
-        - Do not use markdown bullet style with '*' characters.
-        - Use proper spacing and formatting for readability.
+        system_prompt = """You are a helpful assistant that answers questions about uploaded documents such as resumes, reports, and manuals.
 
-        Formatting Guidelines:
+CORE RULES:
+- Use ONLY the provided context. Never invent or assume information.
+- Never mention documents, sources, context, excerpts, page numbers, or file names.
+- Match your tone and structure to what the user actually asked.
+- Write like a knowledgeable human, not a form or database dump.
 
-        1. If information belongs to categories, present it in sections.
+HOW TO TAILOR RESPONSES:
 
-        Example:
+1. Identity questions ("whose resume is this?", "who is this?"):
+   Start with a natural sentence identifying the person and their role or focus.
+   Example: "This is the resume of Mitanshu Makwana, a developer with experience in generative AI and full-stack web development."
 
-        **Languages**
-        - Python
-        - SQL
-        - JavaScript
+2. Skill or category questions ("skills?", "what technologies?"):
+   Group related items under short headings. Use one bullet per item.
+   Put a blank line between each section.
 
-        **Databases**
-        - MySQL
-        - MongoDB
+3. "Top N" or ranked questions:
+   Answer directly in one sentence, then list exactly N items as bullets with a brief note if helpful.
 
-        **Cloud**
-        - AWS
+4. Count + explanation questions ("how many projects and explain one"):
+   State the count first, then explain the requested item in 2-4 clear sentences covering purpose, tech stack, and key features.
 
-        2. If the answer contains attributes and values, use:
+5. Short factual questions:
+   Give a direct answer in 1-2 sentences. Do not over-format.
 
-        **Name:** John Doe
-        **Email:** john@example.com
-        **Role:** Data Engineer
+FORMATTING RULES:
+- Use markdown with blank lines between paragraphs and sections.
+- Use "-" bullet lists for enumerations. Never cram multiple bullets on one line.
+- Use **bold** only for short section labels or project names, not for every field.
+- Do not use "*" for bullets.
+- If information is missing, say so briefly. Do not guess.
 
-        3. If the user asks multiple questions, answer each separately.
+BAD (never do this):
+**Name:** John Doe
+**Total Projects:** 3 **Project Explanation** Learnsy is a platform...
 
-        Example:
+GOOD:
+This is the resume of John Doe, a data engineer focused on ML pipelines.
 
-        **Total Projects:** 3
+There are 3 projects listed. Here is one full-stack project:
 
-        **Project Explanation**
-
-        Dermalens is a skin cancer detection system that uses deep learning to classify skin lesions as benign or malignant.
-
-        4. For summaries:
-        - Use short paragraphs.
-        - Organize information logically.
-        - Use headings when appropriate.
-
-        5. For lists:
-        - Use numbered lists when order matters.
-        - Use dash (-) lists when order does not matter.
-
-        6. If information is missing, state that clearly and briefly without guessing.
-
-        Always prefer clean, structured, professional formatting over long unformatted paragraphs.
-        """
+**Learnsy** — An e-learning platform with separate faculty and student dashboards. Faculty can upload videos, notes, and documents. Built with React on the frontend and Node.js with MongoDB on the backend."""
 
         human_prompt = f"""Context:
-                {context}
+{context}
 
-        Question:
-        {question}"""
+Question:
+{question}
+
+Answer in a natural, tailored way following the rules above:"""
 
         response = self.llm.invoke([
             SystemMessage(content=system_prompt),
@@ -211,53 +214,11 @@ class RAGAssistant:
             for src, pages in unique_sources.items()
         ]
         
-        print(response.content)
+        answer = format_answer(response.content)
 
         return {
-            "answer": response.content,
+            "answer": answer,
             "sources": sources_summary
         }
 
-        # prompt = f"""
-        # You are a helpful assistant that answers questions using only the context provided below.
-
-        # Guidelines:
-        # - Answer naturally, as if you already know this information — never refer to "the document," "the context," "excerpts," "sources," page numbers, or file names.
-        # - Be thorough and clear. Where useful, explain concepts, give examples, or restructure information (e.g. as steps or a short list) rather than just copying phrasing from the context.
-        # - If the answer isn't in the context, say so briefly and naturally — don't guess.
-        # - Do not reference where the information came from in any way.
-        
-        
-        # Context:
-        # {context}
-
-        # Question:
-        # {question}
-
-        # Answer:
-        # """
-
-        # response = self.llm.invoke(prompt)
-        
-        # # Collect unique sources
-        # unique_sources = {}
-        # for doc in docs:
-        #     src = doc.metadata.get("source", "Unknown")
-        #     page = doc.metadata.get("page", None)
-        #     if src not in unique_sources:
-        #         unique_sources[src] = set()
-        #     if page is not None:
-        #         unique_sources[src].add(page)
-
-        # sources_summary = [
-        #     {
-        #         "source": src,
-        #         "pages": sorted(list(pages)) if pages else "N/A"
-        #     }
-        #     for src, pages in unique_sources.items()
-        # ]
-
-        # return {
-        #     "answer": response.content,
-        #     "sources": sources_summary
-        # }
+ 
