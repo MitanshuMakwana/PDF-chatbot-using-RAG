@@ -1,175 +1,402 @@
 let uploadedFiles = [];
 let isUploading = false;
 
-async function uploadFile() {
+if (typeof marked !== "undefined") {
+    marked.setOptions({
+        breaks: true,
+        gfm: true,
+    });
+}
 
+function formatTime(date = new Date()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function updateDocCount() {
+    const count = uploadedFiles.length;
+    const label = document.getElementById("docCount");
+    const dot = document.querySelector(".status-dot");
+    const pill = document.getElementById("docCountPill");
+    const headerStatus = document.getElementById("headerStatus");
+    const chatBox = document.getElementById("chatBox");
+
+    if (label) {
+        label.textContent = count === 0
+            ? "No documents yet"
+            : count === 1
+                ? "1 document active"
+                : `${count} documents active`;
+    }
+
+    if (dot) dot.classList.toggle("active", count > 0);
+    if (headerStatus) headerStatus.classList.toggle("active", count > 0);
+
+    if (pill) {
+        pill.textContent = count;
+        pill.classList.toggle("has-docs", count > 0);
+    }
+
+    if (chatBox) {
+        chatBox.classList.toggle("disabled", count === 0);
+    }
+}
+
+function showToast(message, type = "success") {
+    const container = document.getElementById("toastContainer");
+    const toast = document.createElement("div");
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.classList.add("removing");
+        setTimeout(() => toast.remove(), 300);
+    }, 3200);
+}
+
+function removeWelcomeCard() {
+    const welcome = document.getElementById("welcomeCard");
+    if (welcome) welcome.remove();
+}
+
+function restoreWelcomeCard() {
+    const chat = document.getElementById("chatMessages");
+    if (document.getElementById("welcomeCard")) return;
+
+    chat.innerHTML = `
+        <div class="welcome-card" id="welcomeCard">
+            <div class="welcome-badge">AI Document Assistant</div>
+            <div class="welcome-icon">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <h2>Ask anything about your PDF</h2>
+            <p>Upload a resume, report, or manual — then get clear, tailored answers grounded in your document content.</p>
+            <div class="how-it-works">
+                <div class="how-step"><span class="how-num">1</span><div><strong>Upload</strong><span>Drop a PDF in the sidebar</span></div></div>
+                <div class="how-step"><span class="how-num">2</span><div><strong>Ask</strong><span>Type your question below</span></div></div>
+                <div class="how-step"><span class="how-num">3</span><div><strong>Get answers</strong><span>Receive human-readable responses</span></div></div>
+            </div>
+            <div class="suggestions">
+                <span class="suggestion-label">Quick prompts</span>
+                <div class="suggestion-grid">
+                    <button class="suggestion-chip" onclick="useSuggestion('What is this document about?')">What is this about?</button>
+                    <button class="suggestion-chip" onclick="useSuggestion('Summarize the key points')">Summarize key points</button>
+                    <button class="suggestion-chip" onclick="useSuggestion('List all skills mentioned')">List all skills</button>
+                    <button class="suggestion-chip" onclick="useSuggestion('Explain the main project in detail')">Explain a project</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function appendMessage(role, content, isError = false) {
+    const chat = document.getElementById("chatMessages");
+    const row = document.createElement("div");
+    row.className = `message-row ${role}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.textContent = role === "user" ? "You" : "AI";
+
+    const contentWrap = document.createElement("div");
+    contentWrap.className = "message-content";
+
+    const bubble = document.createElement("div");
+    bubble.className = `message-bubble${isError ? " error" : ""}`;
+
+    if (role === "bot" && !isError) {
+        bubble.innerHTML = marked.parse(content);
+    } else {
+        bubble.textContent = content;
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+
+    const time = document.createElement("span");
+    time.className = "message-time";
+    time.textContent = formatTime();
+    meta.appendChild(time);
+
+    if (role === "bot" && !isError) {
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "copy-btn";
+        copyBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(content).then(() => {
+                copyBtn.classList.add("copied");
+                copyBtn.textContent = "Copied!";
+                setTimeout(() => {
+                    copyBtn.classList.remove("copied");
+                    copyBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+                }, 2000);
+            });
+        };
+        meta.appendChild(copyBtn);
+    }
+
+    contentWrap.appendChild(bubble);
+    contentWrap.appendChild(meta);
+    row.appendChild(avatar);
+    row.appendChild(contentWrap);
+    chat.appendChild(row);
+    chat.scrollTop = chat.scrollHeight;
+
+    return row;
+}
+
+function showTypingIndicator() {
+    const chat = document.getElementById("chatMessages");
+    const row = document.createElement("div");
+    row.className = "message-row bot";
+    row.id = "typingIndicator";
+    row.innerHTML = `
+        <div class="message-avatar">AI</div>
+        <div class="message-content">
+            <div class="message-bubble">
+                <div class="typing-indicator"><span></span><span></span><span></span></div>
+            </div>
+        </div>
+    `;
+    chat.appendChild(row);
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function hideTypingIndicator() {
+    document.getElementById("typingIndicator")?.remove();
+}
+
+function addDocumentToList(filename, chunks) {
+    const list = document.getElementById("documentList");
+    document.getElementById("emptyDocState")?.remove();
+
+    const li = document.createElement("li");
+    li.className = "doc-item";
+    li.dataset.filename = filename;
+    li.innerHTML = `
+        <span class="doc-item-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </span>
+        <div class="doc-item-info">
+            <span class="doc-item-name" title="${filename}">${filename}</span>
+            <span class="doc-item-meta">${chunks ? chunks + " chunks indexed" : "Ready for questions"}</span>
+        </div>
+        <button class="doc-item-remove" data-remove="${encodeURIComponent(filename)}" title="Remove from session" aria-label="Remove document">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+    `;
+    list.appendChild(li);
+
+    li.querySelector(".doc-item-remove")?.addEventListener("click", () => {
+        removeDocument(filename);
+    });
+}
+
+function removeDocument(filename) {
+    uploadedFiles = uploadedFiles.filter((f) => f !== filename);
+    document.querySelector(`.doc-item[data-filename="${CSS.escape(filename)}"]`)?.remove();
+
+    if (uploadedFiles.length === 0) {
+        const list = document.getElementById("documentList");
+        list.innerHTML = `
+            <li class="empty-state" id="emptyDocState">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <p>No documents uploaded</p>
+                <span>Upload a PDF to start chatting</span>
+            </li>
+        `;
+    }
+
+    updateDocCount();
+    showToast(`Removed ${filename}`, "success");
+}
+
+function setUploadStatus(message, type = "") {
+    const status = document.getElementById("uploadStatus");
+    status.textContent = message;
+    status.className = `upload-status${type ? ` ${type}` : ""}`;
+}
+
+function useSuggestion(text) {
+    const input = document.getElementById("question");
+    input.value = text;
+    input.focus();
+
+    if (uploadedFiles.length > 0) {
+        askQuestion();
+    } else {
+        showToast("Upload a PDF first, then try this prompt", "error");
+    }
+}
+
+function clearChat() {
+    const chat = document.getElementById("chatMessages");
+    chat.innerHTML = "";
+    restoreWelcomeCard();
+    showToast("Chat cleared", "success");
+}
+
+function toggleSidebar(open) {
+    const sidebar = document.getElementById("sidebar");
+    const overlay = document.getElementById("sidebarOverlay");
+    const isOpen = open ?? !sidebar.classList.contains("open");
+    sidebar.classList.toggle("open", isOpen);
+    overlay.classList.toggle("visible", isOpen);
+}
+
+async function uploadFile() {
     const fileInput = document.getElementById("fileInput");
     const file = fileInput.files[0];
 
     if (!file) {
-        alert("Please select a PDF");
+        setUploadStatus("Please select a PDF file first.", "error");
         return;
     }
 
-    // Prevent duplicate uploads
     if (uploadedFiles.includes(file.name)) {
-        alert("This PDF is already uploaded.");
+        setUploadStatus("This PDF is already uploaded.", "error");
+        showToast("This PDF is already in your session", "error");
         return;
     }
 
-    // Prevent multiple clicks
-    if (isUploading) {
-        return;
-    }
+    if (isUploading) return;
 
     isUploading = true;
-
-    const uploadStatus =
-        document.getElementById("uploadStatus");
-
-    uploadStatus.innerText = "Uploading PDF...";
+    const uploadBtn = document.getElementById("uploadBtn");
+    uploadBtn.disabled = true;
+    uploadBtn.classList.add("loading");
+    setUploadStatus("Uploading and indexing PDF...", "loading");
 
     const formData = new FormData();
     formData.append("file", file);
 
     try {
-
         const response = await fetch("/api/upload", {
             method: "POST",
-            body: formData
+            body: formData,
         });
 
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(
-                data.detail || "Upload failed"
-            );
+            throw new Error(data.detail || "Upload failed");
         }
 
-        uploadStatus.innerText =
-            data.message || "PDF uploaded successfully";
-
+        setUploadStatus(`Indexed ${data.chunks || 0} chunks successfully`, "success");
         uploadedFiles.push(file.name);
-
-        const li = document.createElement("li");
-        li.textContent = "📄 " + file.name;
-
-        document
-            .getElementById("documentList")
-            .appendChild(li);
-
-        // Clear selected file
+        addDocumentToList(file.name, data.chunks);
+        updateDocCount();
         fileInput.value = "";
+        showToast(`${file.name} is ready for questions`, "success");
+        toggleSidebar(false);
 
     } catch (error) {
-
-        uploadStatus.innerText =
-            error.message || "Upload failed";
-
+        setUploadStatus(error.message || "Upload failed", "error");
+        showToast(error.message || "Upload failed", "error");
     } finally {
-
         isUploading = false;
+        uploadBtn.disabled = false;
+        uploadBtn.classList.remove("loading");
     }
 }
 
 async function askQuestion() {
-
-    const input =
-        document.getElementById("question");
-
-    const question =
-        input.value.trim();
+    const input = document.getElementById("question");
+    const question = input.value.trim();
 
     if (!question) return;
 
-    const chat =
-        document.getElementById("chatMessages");
+    if (uploadedFiles.length === 0) {
+        setUploadStatus("Upload a PDF before asking questions.", "error");
+        showToast("Upload a PDF first", "error");
+        return;
+    }
 
-    // User message
-    chat.innerHTML += `
-        <div class="user-message">
-            ${question}
-        </div>
-    `;
-
-    chat.scrollTop = chat.scrollHeight;
-
+    removeWelcomeCard();
+    appendMessage("user", question);
     input.value = "";
+    showTypingIndicator();
 
-    // Loading message
-    const loadingDiv = document.createElement("div");
-
-    loadingDiv.className = "bot-message";
-
-    loadingDiv.innerHTML = "Thinking...";
-
-    chat.appendChild(loadingDiv);
-
-    chat.scrollTop = chat.scrollHeight;
+    const sendBtn = document.getElementById("sendBtn");
+    sendBtn.disabled = true;
 
     try {
-
         const response = await fetch("/api/chat", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                message: question
-            })
+                message: question,
+                documents: uploadedFiles,
+            }),
         });
 
         const data = await response.json();
-
-        loadingDiv.remove();
+        hideTypingIndicator();
 
         if (!response.ok) {
-
-            chat.innerHTML += `
-                <div class="bot-message">
-                    ERROR: ${data.detail}
-                </div>
-            `;
-
-            chat.scrollTop = chat.scrollHeight;
+            appendMessage("bot", data.detail || "Something went wrong.", true);
             return;
         }
 
-        chat.innerHTML += `
-            <div class="bot-message">
-                ${marked.parse(data.answer)}
-            </div>
-        `;
-
-        chat.scrollTop = chat.scrollHeight;
+        appendMessage("bot", data.answer);
 
     } catch (error) {
-
-        loadingDiv.remove();
-
-        chat.innerHTML += `
-            <div class="bot-message">
-                Error getting response.
-            </div>
-        `;
-
-        chat.scrollTop = chat.scrollHeight;
+        hideTypingIndicator();
+        appendMessage("bot", "Could not reach the server. Please try again.", true);
+    } finally {
+        sendBtn.disabled = false;
+        input.focus();
     }
 }
 
-// Enter key support
 document.addEventListener("DOMContentLoaded", () => {
-
-    const questionInput =
-        document.getElementById("question");
+    const questionInput = document.getElementById("question");
+    const fileInput = document.getElementById("fileInput");
+    const dropZone = document.getElementById("dropZone");
 
     questionInput.addEventListener("keydown", (e) => {
-
         if (e.key === "Enter") {
-
             e.preventDefault();
             askQuestion();
         }
     });
+
+    dropZone.addEventListener("click", () => fileInput.click());
+
+    fileInput.addEventListener("change", () => {
+        if (fileInput.files[0]) uploadFile();
+    });
+
+    dropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("drag-over");
+    });
+
+    dropZone.addEventListener("dragleave", () => {
+        dropZone.classList.remove("drag-over");
+    });
+
+    dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("drag-over");
+
+        const file = e.dataTransfer.files[0];
+        if (!file) return;
+
+        if (!file.name.toLowerCase().endsWith(".pdf")) {
+            setUploadStatus("Only PDF files are supported.", "error");
+            showToast("Only PDF files are supported", "error");
+            return;
+        }
+
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        fileInput.files = dt.files;
+        uploadFile();
+    });
+
+    document.getElementById("sidebarToggle")?.addEventListener("click", () => toggleSidebar());
+    document.getElementById("sidebarOverlay")?.addEventListener("click", () => toggleSidebar(false));
+
+    updateDocCount();
 });
