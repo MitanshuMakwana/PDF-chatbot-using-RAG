@@ -114,7 +114,19 @@ async def chat(payload: ChatRequest):
         )
     except Exception as exc:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(exc)}")
+        message = str(exc)
+        if any(
+            token in message.lower()
+            for token in ("429", "resource_exhausted", "rate limit", "quota")
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Gemini API rate limit reached. Please wait a few seconds "
+                    "and try again."
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Query failed: {message}")
 
     return result
 
