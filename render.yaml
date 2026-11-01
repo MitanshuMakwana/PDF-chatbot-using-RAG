@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: rag-assistant-api
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    disk:
+      name: rag-assistant-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: RAG_DATA_DIR
+        value: /var/data
+      - key: LLM_PROVIDER
+        value: ollama
+      - key: OLLAMA_BASE_URL
+        value: https://ollama.com/v1
+      - key: OLLAMA_MODEL
+        value: gemma4:31b
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

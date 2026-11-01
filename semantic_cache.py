@@ -7,15 +7,18 @@ import json
 import logging
 import os
 import re
+import struct
 import time
 import uuid
 from typing import Any, Optional, Sequence
 
-import numpy as np
-import redis
-from redis.commands.search.field import TagField, TextField, VectorField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
-from redis.exceptions import ResponseError, RedisError
+try:
+    import redis
+    from redis.commands.search.field import TagField, TextField, VectorField
+    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+    from redis.exceptions import ResponseError
+except ImportError:  # Keep the base chatbot usable before optional cache deps are installed.
+    redis = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +36,15 @@ class SemanticCache:
         self.enabled = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
         self.threshold = float(os.getenv("SEMANTIC_CACHE_SIMILARITY_THRESHOLD", "0.90"))
         self.ttl_seconds = int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "86400"))
-        self.scope_id = os.getenv("SEMANTIC_CACHE_SCOPE_ID", "local-default").strip()
+        # New grounding policy: avoid serving answers cached under the older prompt rules.
+        configured_scope = os.getenv("SEMANTIC_CACHE_SCOPE_ID", "local-default").strip()
+        self.scope_id = f"{configured_scope}:evidence-v2"
         self.dimension = int(os.getenv("SEMANTIC_CACHE_EMBEDDING_DIMENSION", "384"))
         self.prefix = os.getenv("SEMANTIC_CACHE_KEY_PREFIX", "rag:semantic-cache:")
         self.index_name = os.getenv("SEMANTIC_CACHE_INDEX_NAME", "rag_semantic_cache_idx")
-        self.client: Optional[redis.Redis] = None
+        self.connect_timeout = float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "5"))
+        self.socket_timeout = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "5"))
+        self.client: Optional[Any] = None
         if not 0.0 <= self.threshold <= 1.0:
             raise ValueError("SEMANTIC_CACHE_SIMILARITY_THRESHOLD must be between 0 and 1")
         if self.ttl_seconds <= 0:
@@ -48,13 +55,27 @@ class SemanticCache:
         if not self.enabled or not self.url:
             logger.info("Semantic cache disabled or REDIS_URL not configured")
             return False
+        if redis is None:
+            logger.warning("Redis client package unavailable; continuing without semantic cache")
+            return False
         try:
-            self.client = redis.Redis.from_url(self.url, decode_responses=False, socket_connect_timeout=2, socket_timeout=2)
+            self.client = redis.Redis.from_url(
+                self.url,
+                decode_responses=False,
+                socket_connect_timeout=self.connect_timeout,
+                socket_timeout=self.socket_timeout,
+            )
             self.client.ping()
             try:
                 self.client.ft(self.index_name).info()
             except ResponseError as exc:
-                if "unknown index name" not in str(exc).lower():
+                error_text = str(exc).lower()
+                missing_index_errors = (
+                    "unknown index name",
+                    "search_index_not_found",
+                    "index not found",
+                )
+                if not any(marker in error_text for marker in missing_index_errors):
                     raise
                 self.client.ft(self.index_name).create_index(
                     [
@@ -133,9 +154,9 @@ class SemanticCache:
         if self.client is None:
             return None
         try:
-            vector = np.asarray(embedding, dtype=np.float32)
-            if vector.size != self.dimension:
-                logger.warning("Skipping semantic cache lookup: expected %d dimensions, got %d", self.dimension, vector.size)
+            vector = [float(value) for value in embedding]
+            if len(vector) != self.dimension:
+                logger.warning("Skipping semantic cache lookup: expected %d dimensions, got %d", self.dimension, len(vector))
                 return None
             query = (
                 f"(@scope_id:{{{_safe_tag(self.scope_id)}}}) "
@@ -144,7 +165,7 @@ class SemanticCache:
                 f"=>[KNN 1 @embedding $vec AS distance]"
             )
             result = self.client.ft(self.index_name).search(
-                query, query_params={"vec": vector.tobytes()},
+                query, query_params={"vec": struct.pack(f"{len(vector)}f", *vector)},
                 sort_by="distance", return_fields=["answer", "sources", "distance", "hit_count"], dialect=2,
             )
             if not result.docs:
@@ -169,13 +190,13 @@ class SemanticCache:
         if self.client is None:
             return
         try:
-            vector = np.asarray(embedding, dtype=np.float32)
-            if vector.size != self.dimension or not answer.strip():
+            vector = [float(value) for value in embedding]
+            if len(vector) != self.dimension or not answer.strip():
                 return
             key = f"{self.prefix}{uuid.uuid4().hex}"
             fields = {
                 "question": question,
-                "embedding": vector.tobytes(),
+                "embedding": struct.pack(f"{len(vector)}f", *vector),
                 "answer": answer,
                 "sources": json.dumps(sources, ensure_ascii=False),
                 "collection_id": collection_id,

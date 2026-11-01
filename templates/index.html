@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RAG Assistant — Document Q&A</title>
-    <link rel="stylesheet" href="/static/style.css?v=3">
+    <link rel="stylesheet" href="/static/style.css?v=31">
+    <script src="/config.js"></script>
 </head>
 <body>
 
@@ -102,20 +103,19 @@
         <div class="sidebar-overlay" id="sidebarOverlay"></div>
 
         <main class="chat-panel">
-
-            <div class="chat-toolbar glass">
-                <div class="chat-toolbar-left">
-                    <h2>Chat</h2>
-                    <span class="step-badge">Step 2</span>
-                </div>
-                <button class="btn btn-ghost" id="clearChatBtn" onclick="clearChat()" title="Clear conversation">
+            <div class="chat-actions">
+                <button class="btn-clear" id="clearChatBtn" onclick="clearChat()" title="Clear conversation">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
                     Clear chat
                 </button>
             </div>
 
             <div id="chatMessages" class="chat-messages">
-
+                <div id="chatTranscript" class="chat-transcript">
+                <div class="chat-heading">
+                    <h2>Chat</h2>
+                    <span class="step-badge">Step 2</span>
+                </div>
                 <div class="welcome-card" id="welcomeCard">
                     <div class="welcome-badge">AI Document Assistant</div>
                     <div class="welcome-icon">
@@ -170,29 +170,34 @@
                         </div>
                     </div>
                 </div>
-
+                </div>
             </div>
 
-            <div class="chat-input-area glass">
-                <div class="chat-box" id="chatBox">
-                    <input
-                        type="text"
-                        id="question"
-                        placeholder="Ask a question about your documents..."
-                        autocomplete="off"
-                    >
-                    <button class="btn btn-send" id="sendBtn" onclick="askQuestion()" title="Send message" aria-label="Send message">
-                        <svg class="send-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="22" y1="2" x2="11" y2="13"/>
-                            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                        </svg>
-                    </button>
+            <div class="chat-input-area">
+                <div class="composer-shell">
+                    <div class="chat-box" id="chatBox">
+                        <button class="btn-attach" id="attachBtn" type="button" title="Upload a PDF" aria-label="Upload a PDF">
+                            <span aria-hidden="true">+</span>
+                        </button>
+                        <textarea
+                            id="question"
+                            placeholder="Ask a question about your documents..."
+                            autocomplete="off"
+                            rows="1"
+                        ></textarea>
+                        <button class="btn btn-send" id="sendBtn" onclick="askQuestion()" title="Send message" aria-label="Send message">
+                            <svg class="send-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="22" y1="2" x2="11" y2="13"/>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <p class="input-hint">
+                        <kbd>Enter</kbd> to send
+                        <span class="hint-sep">·</span>
+                        Scoped to uploaded PDFs only
+                    </p>
                 </div>
-                <p class="input-hint">
-                    <kbd>Enter</kbd> to send
-                    <span class="hint-sep">·</span>
-                    Scoped to uploaded PDFs only
-                </p>
             </div>
 
         </main>
@@ -204,7 +209,7 @@
 <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="/static/script.js?v=3"></script>
+<script src="/static/script.js?v=9"></script>
 
 </body>
 </html>

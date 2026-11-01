@@ -1,6 +1,11 @@
 let uploadedFiles = [];
 let isUploading = false;
 
+function apiUrl(path) {
+    const base = (window.RAG_API_BASE_URL || "").replace(/\/$/, "");
+    return `${base}${path}`;
+}
+
 if (typeof marked !== "undefined") {
     marked.setOptions({
         breaks: true,
@@ -60,10 +65,10 @@ function removeWelcomeCard() {
 }
 
 function restoreWelcomeCard() {
-    const chat = document.getElementById("chatMessages");
+    const chat = document.getElementById("chatTranscript");
     if (document.getElementById("welcomeCard")) return;
 
-    chat.innerHTML = `
+    chat.insertAdjacentHTML("beforeend", `
         <div class="welcome-card" id="welcomeCard">
             <div class="welcome-badge">AI Document Assistant</div>
             <div class="welcome-icon">
@@ -86,11 +91,12 @@ function restoreWelcomeCard() {
                 </div>
             </div>
         </div>
-    `;
+    `);
 }
 
-function appendMessage(role, content, isError = false) {
+function appendMessage(role, content, isError = false, sources = []) {
     const chat = document.getElementById("chatMessages");
+    const transcript = document.getElementById("chatTranscript");
     const row = document.createElement("div");
     row.className = `message-row ${role}`;
 
@@ -106,6 +112,58 @@ function appendMessage(role, content, isError = false) {
 
     if (role === "bot" && !isError) {
         bubble.innerHTML = marked.parse(content);
+        const sourceControl = document.createElement("div");
+        sourceControl.className = "source-control";
+
+        const sourceButton = document.createElement("button");
+        sourceButton.className = "source-dot";
+        sourceButton.type = "button";
+        sourceButton.setAttribute("aria-label", "Show answer sources");
+        sourceButton.setAttribute("aria-expanded", "false");
+        sourceButton.title = "Answer sources";
+
+        const sourcePopover = document.createElement("div");
+        sourcePopover.className = "source-popover";
+        sourcePopover.setAttribute("role", "tooltip");
+        sourcePopover.id = `sources-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        sourceButton.setAttribute("aria-describedby", sourcePopover.id);
+
+        const sourceHeading = document.createElement("strong");
+        sourceHeading.textContent = "Sources";
+        sourcePopover.appendChild(sourceHeading);
+
+        if (!sources.length) {
+            const noSources = document.createElement("span");
+            noSources.className = "source-pages";
+            noSources.textContent = "No PDF source pages were returned for this answer.";
+            sourcePopover.appendChild(noSources);
+        } else {
+            sources.forEach((source) => {
+                const item = document.createElement("div");
+                item.className = "source-item";
+
+                const name = document.createElement("span");
+                name.className = "source-name";
+                name.textContent = source.source || "Uploaded PDF";
+                item.appendChild(name);
+
+                const pages = Array.isArray(source.pages) ? source.pages : [];
+                if (pages.length) {
+                    const pageLabel = document.createElement("span");
+                    pageLabel.className = "source-pages";
+                    pageLabel.textContent = `Page${pages.length === 1 ? "" : "s"} ${pages.join(", ")}`;
+                    item.appendChild(pageLabel);
+                }
+                sourcePopover.appendChild(item);
+            });
+        }
+
+        sourceControl.addEventListener("mouseenter", () => sourceButton.setAttribute("aria-expanded", "true"));
+        sourceControl.addEventListener("mouseleave", () => sourceButton.setAttribute("aria-expanded", "false"));
+        sourceButton.addEventListener("focus", () => sourceButton.setAttribute("aria-expanded", "true"));
+        sourceButton.addEventListener("blur", () => sourceButton.setAttribute("aria-expanded", "false"));
+        sourceControl.append(sourceButton, sourcePopover);
+        bubble.appendChild(sourceControl);
     } else {
         bubble.textContent = content;
     }
@@ -139,7 +197,7 @@ function appendMessage(role, content, isError = false) {
     contentWrap.appendChild(meta);
     row.appendChild(avatar);
     row.appendChild(contentWrap);
-    chat.appendChild(row);
+    transcript.appendChild(row);
     chat.scrollTop = chat.scrollHeight;
 
     return row;
@@ -147,6 +205,7 @@ function appendMessage(role, content, isError = false) {
 
 function showTypingIndicator() {
     const chat = document.getElementById("chatMessages");
+    const transcript = document.getElementById("chatTranscript");
     const row = document.createElement("div");
     row.className = "message-row bot";
     row.id = "typingIndicator";
@@ -158,7 +217,7 @@ function showTypingIndicator() {
             </div>
         </div>
     `;
-    chat.appendChild(row);
+    transcript.appendChild(row);
     chat.scrollTop = chat.scrollHeight;
 }
 
@@ -231,9 +290,20 @@ function useSuggestion(text) {
 
 function clearChat() {
     const chat = document.getElementById("chatMessages");
-    chat.innerHTML = "";
+    const transcript = document.getElementById("chatTranscript");
+    transcript.querySelectorAll(":scope > .message-row").forEach((row) => row.remove());
+    document.getElementById("welcomeCard")?.remove();
     restoreWelcomeCard();
+    chat.scrollTop = 0;
     showToast("Chat cleared", "success");
+}
+
+function resizeQuestionInput() {
+    const input = document.getElementById("question");
+    input.style.height = "auto";
+    const maxHeight = 200;
+    input.style.height = `${Math.min(input.scrollHeight, maxHeight)}px`;
+    input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function toggleSidebar(open) {
@@ -271,7 +341,7 @@ async function uploadFile() {
     formData.append("file", file);
 
     try {
-        const response = await fetch("/api/upload", {
+        const response = await fetch(apiUrl("/api/upload"), {
             method: "POST",
             body: formData,
         });
@@ -315,13 +385,14 @@ async function askQuestion() {
     removeWelcomeCard();
     appendMessage("user", question);
     input.value = "";
+    resizeQuestionInput();
     showTypingIndicator();
 
     const sendBtn = document.getElementById("sendBtn");
     sendBtn.disabled = true;
 
     try {
-        const response = await fetch("/api/chat", {
+        const response = await fetch(apiUrl("/api/chat"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -338,7 +409,7 @@ async function askQuestion() {
             return;
         }
 
-        appendMessage("bot", data.answer);
+        appendMessage("bot", data.answer, false, data.sources || []);
 
     } catch (error) {
         hideTypingIndicator();
@@ -353,13 +424,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const questionInput = document.getElementById("question");
     const fileInput = document.getElementById("fileInput");
     const dropZone = document.getElementById("dropZone");
+    const attachButton = document.getElementById("attachBtn");
 
     questionInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
+            if (e.shiftKey) return;
             e.preventDefault();
             askQuestion();
         }
     });
+    questionInput.addEventListener("input", resizeQuestionInput);
+    attachButton.addEventListener("click", () => fileInput.click());
 
     dropZone.addEventListener("click", () => fileInput.click());
 

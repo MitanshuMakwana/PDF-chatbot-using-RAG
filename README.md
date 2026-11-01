@@ -1,6 +1,6 @@
-# RAG Assistant — PDF Chatbot using FastAPI, Gemini & ChromaDB
+# RAG Assistant — PDF Chatbot using FastAPI, Ollama/Gemini & ChromaDB
 
-A Retrieval-Augmented Generation (RAG) web app that lets you upload PDF documents and ask natural-language questions. Answers are grounded in your uploaded files using semantic search and Google Gemini.
+A Retrieval-Augmented Generation (RAG) web app that lets you upload PDF documents and ask natural-language questions. Answers are grounded in your uploaded files using semantic search and a configurable Ollama or Gemini model.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.139-green)
@@ -14,8 +14,12 @@ A Retrieval-Augmented Generation (RAG) web app that lets you upload PDF document
 - **Session-scoped Q&A** — answers use only PDFs uploaded in the current browser session
 - **Multi-document support** — per-document retrieval so one file cannot crowd out another
 - **Human-readable answers** — tailored responses (lists, summaries, comparisons) via prompt engineering
-- **Modern dark UI** — sidebar upload panel, chat interface, quick prompts, copy-to-clipboard
-- **Rate-limit resilience** — exponential backoff retries for Gemini `429 RESOURCE_EXHAUSTED`
+- **Refined chat UI** — neutral dark-grey glass panels, restrained `#77DD77` accents, and no green card glow
+- **Readable chat actions** — sent-message bubbles use the same light-green tint as Upload & Index and Send
+- **Source details on demand** — hover or focus the source dot on an answer to see its PDF filename and page number(s)
+- **Provider choice** — Ollama Cloud, local Ollama, or Gemini selected through environment variables
+- **Semantic answer cache** — optional Redis Search vector cache, scoped to the active PDFs and their indexed content version
+- **Rate-limit resilience** — exponential backoff retries for provider rate limits
 - **Windows-safe text handling** — sanitizes PDF bullets/symbols (e.g. `\uf0b7`) that break cp1252 consoles
 - **Lazy model loading** — page loads instantly; embeddings load on first upload/chat
 
@@ -26,9 +30,10 @@ A Retrieval-Augmented Generation (RAG) web app that lets you upload PDF document
 | Layer | Technology |
 |-------|------------|
 | Backend | FastAPI, Uvicorn |
-| LLM | Google Gemini 2.5 Flash |
+| LLM | Ollama Cloud/local or Google Gemini (configurable) |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` |
 | Vector DB | ChromaDB |
+| Semantic cache | Redis Search vector index (optional; ChromaDB remains the document store) |
 | RAG framework | LangChain |
 | PDF parsing | PyMuPDF (`PyMuPDFLoader`) |
 | Frontend | HTML, CSS, JavaScript, Marked.js |
@@ -42,14 +47,18 @@ rag-assistant/
 ├── chroma_db/          # Persisted vector store (auto-created)
 ├── uploads/            # Uploaded PDF files (auto-created)
 ├── static/
-│   ├── style.css       # Dark-themed UI styles
+│   ├── style.css       # Dark glass theme, accent colors, and responsive layout
 │   └── script.js       # Upload, chat, session document tracking
 ├── templates/
 │   └── index.html      # Main web page
+├── semantic_cache.py   # Redis vector cache, TTL, lookup, and invalidation
 ├── rag.py              # RAG pipeline, retrieval, LLM calls
 ├── main.py             # FastAPI routes & server config
+├── tests/               # Semantic cache and RAG cache-flow tests
+├── render.yaml          # Render backend deployment blueprint
+├── vercel.json          # Vercel frontend deployment config
 ├── requirements.txt
-├── .env                # API keys (not committed)
+├── .env                # Local environment settings and secrets (not committed)
 └── README.md
 ```
 
@@ -70,14 +79,22 @@ Store in ChromaDB (with source metadata)
       ↓
 User asks a question
       ↓
-Per-document similarity search (multi-PDF mode)
+Embed question once
+      ↓
+Redis semantic cache lookup (active PDF collection and content fingerprint)
+      ↓ cache miss (or Redis unavailable)
+Per-document ChromaDB similarity search (multi-PDF mode)
       ↓
 Build labeled context blocks
       ↓
-Gemini generates answer (with retry on rate limits)
+Configured Ollama or Gemini model generates answer (with retry on rate limits)
       ↓
-Formatted markdown response in chat UI
+Cache eligible answer in Redis with a TTL
+      ↓
+Formatted markdown response with hoverable source details
 ```
+
+Redis is an optional answer cache, not a replacement for ChromaDB. If Redis is unavailable, questions continue through the normal ChromaDB and LLM flow. Cache entries are isolated by the active document set and its content fingerprint, and are invalidated when indexed documents change.
 
 ### Multi-document retrieval
 
@@ -85,7 +102,7 @@ When multiple PDFs are active, the app does **not** run a single global top-k se
 
 1. Retrieves top chunks **from each PDF separately**
 2. Guarantees a **minimum number of chunks per document**
-3. Merges and labels context so Gemini can answer per-file, combined, or comparative questions
+3. Merges and labels context so the configured LLM can answer per-file, combined, or comparative questions
 
 ---
 
@@ -126,13 +143,16 @@ pip install -r requirements.txt
 
 ### 4. Configure environment variables
 
-Create a `.env` file in the project root:
+Create or edit `.env` in the project root and set the provider. For Ollama Cloud:
 
 ```env
-GOOGLE_API_KEY=your_google_gemini_api_key_here
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=https://ollama.com/v1
+OLLAMA_API_KEY=your_ollama_api_key
+OLLAMA_MODEL=gemma4:31b
 ```
 
-Get a key from [Google AI Studio](https://aistudio.google.com/apikey).
+For local Ollama, use `OLLAMA_BASE_URL=http://localhost:11434/v1` and `OLLAMA_API_KEY=ollama`. For Gemini, set `LLM_PROVIDER=gemini` and `GOOGLE_API_KEY`. Keep provider keys on the backend; never put them in frontend JavaScript. Add `REDIS_URL` to enable hosted Redis semantic caching.
 
 ---
 
@@ -204,8 +224,43 @@ Key settings in `rag.py`:
 | `chunk_overlap` | `300` | Overlap between chunks |
 | `per_doc_k` | `4` | Chunks retrieved per PDF (multi-doc) |
 | `min_per_doc` | `2` | Minimum guaranteed chunks per PDF |
-| `LLM_MAX_RETRIES` | `5` | Gemini rate-limit retry attempts |
+| `LLM_MAX_RETRIES` | `5` | Provider rate-limit retry attempts |
 | `LLM_BASE_DELAY_SEC` | `2.0` | Base delay for exponential backoff |
+
+### Hosted Redis semantic cache
+
+The semantic answer cache requires Redis Search with vector support; an ordinary Redis key-value database is not sufficient. The application accepts hosted Redis connection URLs through `REDIS_URL`, including TLS URLs using `rediss://`. Do not commit `.env` or share the connection URL.
+
+1. Create a hosted Redis database whose feature list includes Redis Search/vector search.
+2. Copy its endpoint, port, username, and password, and enable TLS when the plan supports it.
+3. Set `REDIS_URL` in `.env` using the provider's connection URL. If composing the URL yourself, URL-encode special characters in credentials.
+4. Start the app. On startup it connects and creates `rag_semantic_cache_idx` when needed.
+5. Verify connectivity and index creation by running `python -m unittest discover -s tests -v` with `RUN_REDIS_INTEGRATION=1` and `REDIS_URL` set in the current shell.
+
+If Redis is unreachable, the app logs that the semantic cache is unavailable and continues through the existing ChromaDB RAG flow.
+
+Optional cache settings can also be placed in `.env`:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SEMANTIC_CACHE_ENABLED` | `true` | Enable or disable caching |
+| `SEMANTIC_CACHE_SIMILARITY_THRESHOLD` | `0.90` | Minimum similarity for a cache hit |
+| `SEMANTIC_CACHE_TTL_SECONDS` | `86400` | Cache entry lifetime |
+| `SEMANTIC_CACHE_SCOPE_ID` | `local-default` | Isolate entries by deployment or tenant scope |
+
+---
+
+## Hosting on Vercel with a persistent backend
+
+Vercel serves the existing HTML/CSS/JS as static files. The browser sends uploads and chat requests directly to the FastAPI service. The FastAPI service keeps uploads, ChromaDB, and the embedding model together on persistent storage. The provided `render.yaml` is a Render deployment blueprint for that service; its persistent disk requires a paid Render service.
+
+1. Push this project to a private Git repository.
+2. Create the Render service from `render.yaml`. Add `OLLAMA_API_KEY` and `REDIS_URL` in Render's environment settings. Set `CORS_ORIGINS` to the Vercel site's exact origin after deployment. Render documents FastAPI setup and persistent disks [here](https://render.com/docs/deploy-fastapi) and [here](https://render.com/docs/disks).
+3. Import the same repository into Vercel. Set the build environment variable `RAG_API_BASE_URL` to the Render service URL (for example, `https://your-service.onrender.com`) and deploy. The build script copies the existing page and assets into Vercel's static output and writes this URL to `config.js`.
+4. After the first Vercel deployment, copy its site origin into Render's `CORS_ORIGINS` setting and redeploy the backend.
+5. Verify PDF upload, chat, and Redis cache behavior on the deployed site. The Ollama API key remains only in the backend environment.
+
+This is a single-user app today: it has no login or per-user document authorization. Keep the Vercel deployment protected/private until authentication and per-user storage are added; a public URL would let visitors use the same document collection.
 
 ---
 

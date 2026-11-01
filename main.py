@@ -5,7 +5,8 @@ from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -14,7 +15,8 @@ from semantic_cache import SemanticCache
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+DATA_DIR = os.getenv("RAG_DATA_DIR", BASE_DIR).strip() or BASE_DIR
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 ALLOWED_EXTENSIONS = {"pdf"}
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -31,6 +33,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG Assistant", lifespan=lifespan)
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
@@ -43,7 +53,7 @@ def get_assistant():
     if _assistant is None:
         from rag import RAGAssistant
 
-        _assistant = RAGAssistant(persist_dir=os.path.join(BASE_DIR, "chroma_db"))
+        _assistant = RAGAssistant(persist_dir=os.path.join(DATA_DIR, "chroma_db"))
         _assistant.semantic_cache = getattr(app.state, "semantic_cache", None)
     return _assistant
 
@@ -60,7 +70,17 @@ def allowed_file(filename: str) -> bool:
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     # Serve HTML immediately — do not touch Chroma/embeddings on page load
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={},
+    )
+
+
+@app.get("/config.js", response_class=PlainTextResponse)
+def frontend_config():
+    # Local FastAPI-hosted UI uses same-origin API routes.
+    return "window.RAG_API_BASE_URL = '';"
 
 
 @app.get("/api/documents")
@@ -135,10 +155,12 @@ async def chat(payload: ChatRequest):
             token in message.lower()
             for token in ("429", "resource_exhausted", "rate limit", "quota")
         ):
+            provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+            label = "Ollama" if provider == "ollama" else "Gemini"
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    "Gemini API rate limit reached. Please wait a few seconds "
+                    f"{label} API rate limit reached. Please wait a few seconds "
                     "and try again."
                 ),
             )
@@ -153,7 +175,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
-        port=5000,
+        port=int(os.getenv("PORT", "5000")),
         reload=True,
         # Editing CSS/JS/HTML must not restart the server / embedding model
         reload_includes=["*.py"],

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "python scripts/build_frontend.py",
+  "outputDirectory": "vercel_output"
+}
