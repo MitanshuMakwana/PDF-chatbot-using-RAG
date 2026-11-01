@@ -3,6 +3,8 @@ import random
 import re
 import sys
 import time
+import logging
+from typing import Any, Optional, Sequence
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyMuPDFLoader
@@ -11,6 +13,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.messages import SystemMessage, HumanMessage
+from semantic_cache import SemanticCache
 
 load_dotenv()
 
@@ -25,6 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
 # Retry settings for Gemini free-tier 429 / RESOURCE_EXHAUSTED
 LLM_MAX_RETRIES = 5
 LLM_BASE_DELAY_SEC = 2.0
+logger = logging.getLogger(__name__)
 
 
 def sanitize_text(text: str) -> str:
@@ -125,6 +129,7 @@ class RAGAssistant:
             top_p=0.9,
             max_retries=0,  # we handle retries with explicit exponential backoff
         )
+        self.semantic_cache: Optional[SemanticCache] = None
 
     def add_document(self, filepath, filename):
         loader = PyMuPDFLoader(filepath)
@@ -155,6 +160,8 @@ class RAGAssistant:
             )
 
         self.db.add_documents(chunks)
+        if self.semantic_cache is not None:
+            self.semantic_cache.invalidate_all()
         return len(chunks)
 
     def list_documents(self):
@@ -169,7 +176,38 @@ class RAGAssistant:
             return []
 
     def query(self, question, filter_sources=None):
-        docs_scores = self._retrieve(question, filter_sources)
+        active_sources = sorted(set(filter_sources or []))
+        cache = self.semantic_cache
+        cache_embedding = None
+        collection_id = fingerprint = None
+        cache_allowed = bool(
+            cache is not None and cache.client is not None and active_sources
+            and cache.is_cacheable_question(question)
+        )
+        if cache_allowed:
+            try:
+                # One embedding is reused by Redis and Chroma on a miss.
+                cache_embedding = self.embeddings.embed_query(question)
+                collection_id = cache.collection_id(active_sources)
+                data = self.db.get(include=["documents", "metadatas"])
+                records = [
+                    (meta.get("source", ""), content, meta)
+                    for content, meta in zip(data.get("documents") or [], data.get("metadatas") or [])
+                    if meta and meta.get("source") in active_sources
+                ]
+                fingerprint = cache.collection_fingerprint(records)
+                cached = cache.lookup(question, cache_embedding, collection_id, fingerprint)
+                if cached is not None:
+                    cached.pop("_cache_similarity", None)
+                    logger.info("Semantic cache hit")
+                    return cached
+                logger.info("Semantic cache miss")
+            except Exception as exc:
+                # Cache preparation is optional; never make it block normal RAG.
+                logger.warning("Semantic cache preparation failed; continuing with RAG: %s", exc)
+                cache_embedding = None
+
+        docs_scores = self._retrieve(question, filter_sources, cache_embedding)
 
         for doc, score in docs_scores:
             safe_print(
@@ -281,24 +319,35 @@ Answer in a natural, tailored way following the rules above:"""
             for src, pages in unique_sources.items()
         ]
 
-        return {
+        result = {
             "answer": format_answer(response.content),
             "sources": sources_summary,
         }
+        if (
+            cache_allowed and cache_embedding is not None and collection_id and fingerprint
+            and isinstance(result["answer"], str) and cache.is_cacheable_answer(result["answer"])
+            and docs and "no relevant documents found" not in result["answer"].lower()
+        ):
+            cache.store(
+                question, cache_embedding, result["answer"], result["sources"],
+                collection_id, fingerprint,
+            )
+        return result
 
-    def _retrieve(self, question, filter_sources=None):
+    def _retrieve(self, question, filter_sources=None, query_embedding: Optional[Sequence[float]] = None):
         """
         Retrieve chunks with per-document coverage so one PDF cannot crowd out others.
         """
+        search = self.db.similarity_search_by_vector_with_relevance_scores if query_embedding is not None else self.db.similarity_search_with_relevance_scores
         if not filter_sources:
+            if query_embedding is not None:
+                return search(query_embedding, k=6)
             return self.db.similarity_search_with_relevance_scores(question, k=6)
 
         if len(filter_sources) == 1:
-            return self.db.similarity_search_with_relevance_scores(
-                question,
-                k=6,
-                filter={"source": filter_sources[0]},
-            )
+            if query_embedding is not None:
+                return search(query_embedding, k=6, filter={"source": filter_sources[0]})
+            return self.db.similarity_search_with_relevance_scores(question, k=6, filter={"source": filter_sources[0]})
 
         per_doc_k = 4
         min_per_doc = 2
@@ -306,11 +355,10 @@ Answer in a natural, tailored way following the rules above:"""
 
         by_source = {}
         for source in filter_sources:
-            by_source[source] = self.db.similarity_search_with_relevance_scores(
-                question,
-                k=per_doc_k,
-                filter={"source": source},
-            )
+            if query_embedding is not None:
+                by_source[source] = search(query_embedding, k=per_doc_k, filter={"source": source})
+            else:
+                by_source[source] = self.db.similarity_search_with_relevance_scores(question, k=per_doc_k, filter={"source": source})
 
         merged = []
         seen = set()

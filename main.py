@@ -1,5 +1,6 @@
 import os
 import traceback
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -8,14 +9,28 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from semantic_cache import SemanticCache
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 ALLOWED_EXTENSIONS = {"pdf"}
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="RAG Assistant")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    cache = SemanticCache()
+    cache.start()
+    app.state.semantic_cache = cache
+    try:
+        yield
+    finally:
+        cache.close()
+
+
+app = FastAPI(title="RAG Assistant", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
@@ -29,6 +44,7 @@ def get_assistant():
         from rag import RAGAssistant
 
         _assistant = RAGAssistant(persist_dir=os.path.join(BASE_DIR, "chroma_db"))
+        _assistant.semantic_cache = getattr(app.state, "semantic_cache", None)
     return _assistant
 
 
