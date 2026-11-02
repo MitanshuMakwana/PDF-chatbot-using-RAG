@@ -67,6 +67,9 @@ class FakeRedis:
     def pipeline(self): return FakePipeline(self)
     def hset(self, key, mapping): self.records[key] = {"fields": mapping, "expires": float("inf")}
     def expire(self, key, ttl): self.records[key]["expires"] = time.monotonic() + ttl
+    def hmget(self, key, *fields):
+        record = self.records.get(key, {}).get("fields", {})
+        return [record.get(field) for field in fields]
     def scan(self, cursor=0, match=None, count=500): return 0, list(self.records)
     def delete(self, *keys):
         for key in keys: self.records.pop(key, None)
@@ -116,6 +119,20 @@ class SemanticCacheUnitTests(unittest.TestCase):
         other_tenant = make_cache(scope="different-tenant")
         other_tenant.client = self.cache.client
         self.assertIsNone(other_tenant.lookup("question", [1.0, 0.0], self.collection, self.fingerprint))
+
+    def test_user_scope_changes_cache_identity_and_invalidation_is_scoped(self):
+        alice = self.cache.scope_for_user("alice-id")
+        bob = self.cache.scope_for_user("bob-id")
+        self.assertNotEqual(alice, bob)
+        alice_collection = self.cache.collection_id(["handbook.pdf"], scope_id=alice)
+        bob_collection = self.cache.collection_id(["handbook.pdf"], scope_id=bob)
+        self.assertNotEqual(alice_collection, bob_collection)
+        self.cache.store("question", [1.0, 0.0], "Alice answer", [], alice_collection, self.fingerprint, scope_id=alice)
+        self.cache.store("question", [1.0, 0.0], "Bob answer", [], bob_collection, self.fingerprint, scope_id=bob)
+        self.cache.invalidate_scope(alice)
+        self.assertEqual(len(self.cache.client.records), 1)
+        only_entry = next(iter(self.cache.client.records.values()))["fields"]
+        self.assertEqual(only_entry["scope_id"], bob)
 
     def test_expired_entries_are_not_returned(self):
         cache = make_cache(ttl="1")

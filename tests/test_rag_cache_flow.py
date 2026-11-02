@@ -72,6 +72,18 @@ class RAGCacheFlowTests(unittest.TestCase):
         self.assistant.semantic_cache.store.assert_not_called()
         self.assertEqual(result["sources"], [])
 
+    def test_retrieval_filter_always_includes_authenticated_tenant(self):
+        assistant = RAGAssistant.__new__(RAGAssistant)
+        assistant.db = MagicMock()
+        assistant.db.similarity_search_with_relevance_scores.return_value = []
+
+        assistant._retrieve("question", ["private.pdf"], tenant_id="tenant-42")
+
+        assistant.db.similarity_search_with_relevance_scores.assert_called_once_with(
+            "question", k=6,
+            filter={"$and": [{"tenant_id": "tenant-42"}, {"source": "private.pdf"}]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

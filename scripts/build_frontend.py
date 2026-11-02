@@ -21,7 +21,11 @@ def main() -> None:
     shutil.copy2(ROOT / "templates" / "index.html", OUTPUT / "index.html")
     shutil.copytree(ROOT / "static", OUTPUT / "static", dirs_exist_ok=True)
     (OUTPUT / "config.js").write_text(
-        f"window.RAG_API_BASE_URL = {json.dumps(api_base_url)};\n",
+        "window.RAG_API_BASE_URL = " + json.dumps(api_base_url) + ";\n"
+        + "window.RAG_SUPABASE_CONFIG = " + json.dumps({
+            "url": os.getenv("SUPABASE_URL", "").strip(),
+            "anonKey": os.getenv("SUPABASE_ANON_KEY", "").strip(),
+        }) + ";\n",
         encoding="utf-8",
     )
 

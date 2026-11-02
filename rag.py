@@ -146,7 +146,7 @@ class RAGAssistant:
             raise ValueError("LLM_PROVIDER must be 'gemini' or 'ollama'")
         self.semantic_cache: Optional[SemanticCache] = None
 
-    def add_document(self, filepath, filename):
+    def add_document(self, filepath, filename, tenant_id="default"):
         loader = PyMuPDFLoader(filepath)
         documents = loader.load()
 
@@ -164,6 +164,7 @@ class RAGAssistant:
         for chunk in chunks:
             chunk.page_content = sanitize_text(chunk.page_content)
             chunk.metadata["source"] = filename
+            chunk.metadata["tenant_id"] = tenant_id
 
             if "page" in chunk.metadata:
                 chunk.metadata["page"] += 1
@@ -176,12 +177,12 @@ class RAGAssistant:
 
         self.db.add_documents(chunks)
         if self.semantic_cache is not None:
-            self.semantic_cache.invalidate_all()
+            self.semantic_cache.invalidate_scope(self.semantic_cache.scope_for_user(tenant_id))
         return len(chunks)
 
-    def list_documents(self):
+    def list_documents(self, tenant_id="default"):
         try:
-            data = self.db.get()
+            data = self.db.get(where={"tenant_id": tenant_id})
             sources = set()
             for meta in data["metadatas"]:
                 if meta and "source" in meta:
@@ -190,7 +191,13 @@ class RAGAssistant:
         except Exception:
             return []
 
-    def query(self, question, filter_sources=None):
+    def delete_document(self, filename, tenant_id="default"):
+        """Remove one document's chunks inside the authenticated tenant only."""
+        self.db.delete(where={"$and": [{"tenant_id": tenant_id}, {"source": filename}]})
+        if self.semantic_cache is not None:
+            self.semantic_cache.invalidate_scope(self.semantic_cache.scope_for_user(tenant_id))
+
+    def query(self, question, filter_sources=None, tenant_id="default"):
         active_sources = sorted(set(filter_sources or []))
         cache = self.semantic_cache
         cache_embedding = None
@@ -201,17 +208,22 @@ class RAGAssistant:
         )
         if cache_allowed:
             try:
+                cache_scope = cache.scope_for_user(tenant_id)
                 # One embedding is reused by Redis and Chroma on a miss.
                 cache_embedding = self.embeddings.embed_query(question)
-                collection_id = cache.collection_id(active_sources)
-                data = self.db.get(include=["documents", "metadatas"])
+                collection_id = cache.collection_id(active_sources, scope_id=cache_scope)
+                data = self.db.get(
+                    where={"tenant_id": tenant_id}, include=["documents", "metadatas"]
+                )
                 records = [
                     (meta.get("source", ""), content, meta)
                     for content, meta in zip(data.get("documents") or [], data.get("metadatas") or [])
                     if meta and meta.get("source") in active_sources
                 ]
                 fingerprint = cache.collection_fingerprint(records)
-                cached = cache.lookup(question, cache_embedding, collection_id, fingerprint)
+                cached = cache.lookup(
+                    question, cache_embedding, collection_id, fingerprint, scope_id=cache_scope
+                )
                 if cached is not None:
                     cached.pop("_cache_similarity", None)
                     logger.info("Semantic cache hit")
@@ -222,7 +234,9 @@ class RAGAssistant:
                 logger.warning("Semantic cache preparation failed; continuing with RAG: %s", exc)
                 cache_embedding = None
 
-        docs_scores = self._retrieve(question, filter_sources, cache_embedding)
+        docs_scores = self._retrieve(
+            question, filter_sources, cache_embedding, tenant_id=tenant_id
+        )
 
         for doc, score in docs_scores:
             safe_print(
@@ -359,24 +373,33 @@ Answer in a natural, tailored way following the rules above:"""
         ):
             cache.store(
                 question, cache_embedding, result["answer"], result["sources"],
-                collection_id, fingerprint,
+                collection_id, fingerprint, scope_id=cache_scope,
             )
         return result
 
-    def _retrieve(self, question, filter_sources=None, query_embedding: Optional[Sequence[float]] = None):
+    def _retrieve(
+        self, question, filter_sources=None,
+        query_embedding: Optional[Sequence[float]] = None, tenant_id="default",
+    ):
         """
         Retrieve chunks with per-document coverage so one PDF cannot crowd out others.
         """
         search = self.db.similarity_search_by_vector_with_relevance_scores if query_embedding is not None else self.db.similarity_search_with_relevance_scores
+        def tenant_filter(source=None):
+            clauses = [{"tenant_id": tenant_id}]
+            if source is not None:
+                clauses.append({"source": source})
+            return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
         if not filter_sources:
             if query_embedding is not None:
-                return search(query_embedding, k=6)
-            return self.db.similarity_search_with_relevance_scores(question, k=6)
+                return search(query_embedding, k=6, filter=tenant_filter())
+            return self.db.similarity_search_with_relevance_scores(question, k=6, filter=tenant_filter())
 
         if len(filter_sources) == 1:
             if query_embedding is not None:
-                return search(query_embedding, k=6, filter={"source": filter_sources[0]})
-            return self.db.similarity_search_with_relevance_scores(question, k=6, filter={"source": filter_sources[0]})
+                return search(query_embedding, k=6, filter=tenant_filter(filter_sources[0]))
+            return self.db.similarity_search_with_relevance_scores(question, k=6, filter=tenant_filter(filter_sources[0]))
 
         per_doc_k = 4
         min_per_doc = 2
@@ -385,9 +408,9 @@ Answer in a natural, tailored way following the rules above:"""
         by_source = {}
         for source in filter_sources:
             if query_embedding is not None:
-                by_source[source] = search(query_embedding, k=per_doc_k, filter={"source": source})
+                by_source[source] = search(query_embedding, k=per_doc_k, filter=tenant_filter(source))
             else:
-                by_source[source] = self.db.similarity_search_with_relevance_scores(question, k=per_doc_k, filter={"source": source})
+                by_source[source] = self.db.similarity_search_with_relevance_scores(question, k=per_doc_k, filter=tenant_filter(source))
 
         merged = []
         seen = set()

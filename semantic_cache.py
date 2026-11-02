@@ -28,6 +28,12 @@ def _safe_tag(value: str) -> str:
     return re.sub(r"([\\,{}|])", r"\\\1", value)
 
 
+def _decode(value: Any) -> str:
+    if value is None:
+        return ""
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
 class SemanticCache:
     """Store and retrieve scoped answer vectors in Redis Search."""
 
@@ -106,9 +112,16 @@ class SemanticCache:
             self.client = None
 
     @staticmethod
-    def collection_id(sources: Sequence[str]) -> str:
-        normalized = "\n".join(sorted({source.strip() for source in sources if source.strip()}))
+    def collection_id(sources: Sequence[str], scope_id: str = "") -> str:
+        normalized = scope_id + "\n" + "\n".join(
+            sorted({source.strip() for source in sources if source.strip()})
+        )
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def scope_for_user(self, user_id: str) -> str:
+        """Create a stable, non-reversible Redis scope for an authenticated user."""
+        user_hash = hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+        return f"{self.scope_id}:{user_hash}"
 
     @staticmethod
     def collection_fingerprint(records: Sequence[tuple[str, str, Any]]) -> str:
@@ -150,7 +163,7 @@ class SemanticCache:
         return not any(marker in text for marker in excluded)
 
     def lookup(self, question: str, embedding: Sequence[float], collection_id: str,
-               fingerprint: str) -> Optional[dict[str, Any]]:
+               fingerprint: str, scope_id: Optional[str] = None) -> Optional[dict[str, Any]]:
         if self.client is None:
             return None
         try:
@@ -159,7 +172,7 @@ class SemanticCache:
                 logger.warning("Skipping semantic cache lookup: expected %d dimensions, got %d", self.dimension, len(vector))
                 return None
             query = (
-                f"(@scope_id:{{{_safe_tag(self.scope_id)}}}) "
+                f"(@scope_id:{{{_safe_tag(scope_id or self.scope_id)}}}) "
                 f"(@collection_id:{{{_safe_tag(collection_id)}}}) "
                 f"(@fingerprint:{{{_safe_tag(fingerprint)}}})"
                 f"=>[KNN 1 @embedding $vec AS distance]"
@@ -186,7 +199,8 @@ class SemanticCache:
             return None
 
     def store(self, question: str, embedding: Sequence[float], answer: str,
-              sources: list[dict[str, Any]], collection_id: str, fingerprint: str) -> None:
+              sources: list[dict[str, Any]], collection_id: str, fingerprint: str,
+              scope_id: Optional[str] = None) -> None:
         if self.client is None:
             return
         try:
@@ -201,7 +215,7 @@ class SemanticCache:
                 "sources": json.dumps(sources, ensure_ascii=False),
                 "collection_id": collection_id,
                 "fingerprint": fingerprint,
-                "scope_id": self.scope_id,
+                "scope_id": scope_id or self.scope_id,
                 "created_at": str(int(time.time())),
                 "hit_count": "0",
             }
@@ -220,8 +234,8 @@ class SemanticCache:
                 cursor, keys = self.client.scan(cursor=cursor, match=f"{self.prefix}*", count=500)
                 for key in keys:
                     data = self.client.hmget(key, "scope_id", "collection_id")
-                    scope = data[0].decode() if data[0] else ""
-                    coll = data[1].decode() if data[1] else ""
+                    scope = _decode(data[0])
+                    coll = _decode(data[1])
                     if scope == self.scope_id and coll == collection_id:
                         self.client.delete(key)
                 if cursor == 0:
@@ -243,3 +257,21 @@ class SemanticCache:
                     break
         except Exception as exc:
             logger.warning("Semantic cache invalidation failed: %s", exc)
+
+    def invalidate_scope(self, scope_id: str) -> None:
+        """Remove entries for one user scope without affecting other accounts."""
+        if self.client is None:
+            return
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = self.client.scan(cursor=cursor, match=f"{self.prefix}*", count=500)
+                for key in keys:
+                    values = self.client.hmget(key, "scope_id")
+                    stored_scope = _decode(values[0])
+                    if stored_scope == scope_id:
+                        self.client.delete(key)
+                if cursor == 0:
+                    break
+        except Exception as exc:
+            logger.warning("Scoped semantic cache invalidation failed: %s", exc)

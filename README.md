@@ -198,10 +198,11 @@ http://127.0.0.1:5000
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/` | Web UI |
-| `POST` | `/api/upload` | Upload and index a PDF |
-| `POST` | `/api/chat` | Ask a question (`message`, `documents[]`) |
-| `GET` | `/api/documents` | List indexed document names in ChromaDB |
-| `GET` | `/api/document-content` | Sample stored chunk text (debug) |
+| `POST` | `/api/upload` | Upload and index a PDF (authenticated) |
+| `POST` | `/api/chat` | Ask a question (`message`, `documents[]`; authenticated) |
+| `GET` | `/api/documents` | List the signed-in user's indexed PDFs |
+| `DELETE` | `/api/documents/{filename}` | Delete one of the signed-in user's PDFs |
+| `GET` | `/api/document-content` | Sample the signed-in user's stored chunk text (debug) |
 
 ### Chat request example
 
@@ -250,17 +251,19 @@ Optional cache settings can also be placed in `.env`:
 
 ---
 
-## Hosting on Vercel with a persistent backend
+## Hosting with login and per-user documents
 
-Vercel serves the existing HTML/CSS/JS as static files. The browser sends uploads and chat requests directly to the FastAPI service. The FastAPI service keeps uploads, ChromaDB, and the embedding model together on persistent storage. The provided `render.yaml` is a Render deployment blueprint for that service; its persistent disk requires a paid Render service.
+Supabase Auth provides Google OAuth and email/password sign-in. The browser sends a Supabase access token with every API call; FastAPI verifies it with Supabase Auth. The authenticated Supabase user ID is stored on Chroma records and used in every listing, retrieval, deletion, and semantic-cache scope. Users cannot access records that lack their tenant ID.
 
-1. Push this project to a private Git repository.
-2. Create the Render service from `render.yaml`. Add `OLLAMA_API_KEY` and `REDIS_URL` in Render's environment settings. Set `CORS_ORIGINS` to the Vercel site's exact origin after deployment. Render documents FastAPI setup and persistent disks [here](https://render.com/docs/deploy-fastapi) and [here](https://render.com/docs/disks).
-3. Import the same repository into Vercel. Set the build environment variable `RAG_API_BASE_URL` to the Render service URL (for example, `https://your-service.onrender.com`) and deploy. The build script copies the existing page and assets into Vercel's static output and writes this URL to `config.js`.
-4. After the first Vercel deployment, copy its site origin into Render's `CORS_ORIGINS` setting and redeploy the backend.
-5. Verify PDF upload, chat, and Redis cache behavior on the deployed site. The Ollama API key remains only in the backend environment.
+1. Create a Supabase project. In **Authentication → Providers**, enable Email and Google; configure the Google OAuth credentials with the redirect URL shown by Supabase. Add the local app URL and the Vercel site URL to **Authentication → URL Configuration → Redirect URLs**.
+2. Copy the project URL and the public anon/publishable key. Put them in local `.env` as `SUPABASE_URL` and `SUPABASE_ANON_KEY` (never use a service-role key in the frontend).
+3. Add `SUPABASE_URL` and `SUPABASE_ANON_KEY` as environment variables in both Render and Vercel. Vercel uses them at build time to generate the public browser configuration; Render uses them to verify access tokens.
+4. Keep `RAG_API_BASE_URL` set in Vercel and set Render `CORS_ORIGINS` to the exact Vercel origin. Redeploy both services after changing these values.
+5. On Render's Free plan, `RAG_DATA_DIR=/tmp/rag-data` is ephemeral. Uploaded PDFs and Chroma data can be lost when the service restarts or is replaced. Use persistent storage for lasting document storage.
 
-This is a single-user app today: it has no login or per-user document authorization. Keep the Vercel deployment protected/private until authentication and per-user storage are added; a public URL would let visitors use the same document collection.
+`render.yaml` defines the Free service settings and environment variable names. Add model and Redis secrets in the Render dashboard; do not commit credentials. `.env.example` lists the local variables without real credentials.
+
+The root page contains only the frontend shell; document APIs require a valid Supabase user token. Existing Chroma records without a `tenant_id` remain inaccessible through authenticated endpoints. Existing deployments will not display the sign-in form correctly until the Supabase URL and public key are configured on both hosts.
 
 ---
 

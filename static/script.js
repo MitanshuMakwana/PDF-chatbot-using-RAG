@@ -1,5 +1,197 @@
 let uploadedFiles = [];
 let isUploading = false;
+let supabaseClient = null;
+let currentSession = null;
+let authMode = "signin";
+
+function setAuthStatus(message, error = false) {
+    const status = document.getElementById("authStatus");
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle("error", error);
+}
+
+function displayName(user) {
+    const metadata = user?.user_metadata || {};
+    return (metadata.username || metadata.full_name || metadata.name || user?.email?.split("@")[0] || "there").trim();
+}
+
+function initials(name) {
+    const parts = name.split(/\s+/).filter(Boolean);
+    return (parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : (parts[0] || "?").slice(0, 2)).toUpperCase();
+}
+
+function personalizeWelcome(user) {
+    const name = displayName(user);
+    const templates = [
+        `Hello, ${name}. Good to see you.`,
+        `How are you doing, ${name}?`,
+        `Ready when you are, ${name}.`,
+        `What would you like to explore today, ${name}?`,
+        `Welcome back, ${name}. What can I help you find?`,
+    ];
+    const storageKey = `rag-greeting:${user.id}`;
+    const previous = localStorage.getItem(storageKey);
+    const choices = templates.filter((greeting) => greeting !== previous);
+    const greeting = choices[Math.floor(Math.random() * choices.length)] || templates[0];
+    localStorage.setItem(storageKey, greeting);
+    const line = document.getElementById("welcomeGreeting");
+    if (line) line.textContent = greeting;
+}
+
+function showAuthenticatedApp(user, session) {
+    currentSession = session;
+    document.body.classList.add("authenticated");
+    document.getElementById("authScreen")?.setAttribute("hidden", "");
+    const profile = document.getElementById("profileMenu");
+    profile?.removeAttribute("hidden");
+    const name = displayName(user);
+    document.getElementById("profileAvatar").textContent = initials(name);
+    document.getElementById("profileName").textContent = name;
+    document.getElementById("profileEmail").textContent = user.email || "";
+    personalizeWelcome(user);
+    loadUserDocuments();
+}
+
+function showSignedOut(message = "") {
+    currentSession = null;
+    uploadedFiles = [];
+    const transcript = document.getElementById("chatTranscript");
+    transcript?.querySelectorAll(":scope > .message-row").forEach((row) => row.remove());
+    document.getElementById("welcomeCard")?.remove();
+    restoreWelcomeCard();
+    const list = document.getElementById("documentList");
+    if (list) list.innerHTML = `<li class="empty-state" id="emptyDocState"><p>No documents uploaded</p><span>Upload a PDF to start chatting</span></li>`;
+    document.body.classList.remove("authenticated");
+    document.getElementById("profileMenu")?.setAttribute("hidden", "");
+    document.getElementById("profileDropdown")?.setAttribute("hidden", "");
+    document.getElementById("authScreen")?.removeAttribute("hidden");
+    setAuthStatus(message);
+    updateDocCount();
+}
+
+async function initializeAuth() {
+    const config = window.RAG_SUPABASE_CONFIG || {};
+    if (!config.url || !config.anonKey || !window.supabase?.createClient) {
+        showSignedOut("Authentication is not configured yet. Add the Supabase project URL and anon key to the app settings.");
+        return;
+    }
+
+    supabaseClient = window.supabase.createClient(config.url, config.anonKey, {
+        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error) setAuthStatus(error.message, true);
+    if (data?.session) showAuthenticatedApp(data.session.user, data.session);
+    else showSignedOut();
+
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+        window.setTimeout(() => {
+            if (session) showAuthenticatedApp(session.user, session);
+            else if (event === "SIGNED_OUT") showSignedOut();
+        }, 0);
+    });
+}
+
+async function authorizedFetch(path, options = {}) {
+    if (!supabaseClient) throw new Error("Sign-in is not configured yet.");
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error || !data.session?.access_token) throw new Error("Your session expired. Please sign in again.");
+    currentSession = data.session;
+    const headers = new Headers(options.headers || {});
+    headers.set("Authorization", `Bearer ${data.session.access_token}`);
+    return fetch(apiUrl(path), { ...options, headers });
+}
+
+async function loadUserDocuments() {
+    try {
+        const response = await authorizedFetch("/api/documents");
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load your PDFs.");
+        uploadedFiles = Array.isArray(data.documents) ? data.documents : [];
+        const list = document.getElementById("documentList");
+        list.innerHTML = "";
+        if (uploadedFiles.length) uploadedFiles.forEach((filename) => addDocumentToList(filename));
+        else list.innerHTML = `<li class="empty-state" id="emptyDocState"><p>No documents uploaded</p><span>Upload a PDF to start chatting</span></li>`;
+        updateDocCount();
+    } catch (error) {
+        showToast(error.message || "Could not load your PDFs.", "error");
+    }
+}
+
+async function submitAuthForm(event) {
+    event.preventDefault();
+    if (!supabaseClient) {
+        setAuthStatus("Authentication is not configured yet. Add your Supabase project settings first.", true);
+        return;
+    }
+    const email = document.getElementById("authEmail").value.trim();
+    const password = document.getElementById("authPassword").value;
+    const username = document.getElementById("authUsername").value.trim();
+    const submit = document.getElementById("authSubmit");
+    submit.disabled = true;
+    setAuthStatus(authMode === "signup" ? "Creating your account…" : "Signing in…");
+    try {
+        const result = authMode === "signup"
+            ? await supabaseClient.auth.signUp({ email, password, options: { data: { username } } })
+            : await supabaseClient.auth.signInWithPassword({ email, password });
+        if (result.error) throw result.error;
+        if (result.data.session) {
+            showAuthenticatedApp(result.data.session.user, result.data.session);
+            setAuthStatus("");
+        } else {
+            setAuthStatus("Account created. Check your email to confirm, then sign in.");
+        }
+    } catch (error) {
+        setAuthStatus(error.message || "Could not sign in.", true);
+    } finally {
+        submit.disabled = false;
+    }
+}
+
+function toggleAuthMode() {
+    authMode = authMode === "signin" ? "signup" : "signin";
+    const signup = authMode === "signup";
+    document.getElementById("authTitle").textContent = signup ? "Create your account" : "Sign in to RAG Assistant";
+    document.getElementById("authSubmit").textContent = signup ? "Create account" : "Sign in";
+    document.getElementById("authTogglePrompt").textContent = signup ? "Already have an account?" : "New here?";
+    document.getElementById("authToggle").textContent = signup ? "Sign in" : "Create an account";
+    document.getElementById("authUsername").hidden = !signup;
+    document.getElementById("usernameLabel").hidden = !signup;
+    document.getElementById("authUsername").required = signup;
+    document.getElementById("authPassword").autocomplete = signup ? "new-password" : "current-password";
+    setAuthStatus("");
+}
+
+function bindAuthControls() {
+    document.getElementById("authForm")?.addEventListener("submit", submitAuthForm);
+    document.getElementById("authToggle")?.addEventListener("click", toggleAuthMode);
+    document.getElementById("googleSignIn")?.addEventListener("click", async () => {
+        if (!supabaseClient) return setAuthStatus("Authentication is not configured yet.", true);
+        const { error } = await supabaseClient.auth.signInWithOAuth({
+            provider: "google", options: { redirectTo: window.location.origin },
+        });
+        if (error) setAuthStatus(error.message, true);
+    });
+    document.getElementById("profileAvatar")?.addEventListener("click", () => {
+        const menu = document.getElementById("profileDropdown");
+        const open = menu.hidden;
+        menu.hidden = !open;
+        document.getElementById("profileAvatar").setAttribute("aria-expanded", String(open));
+    });
+    document.getElementById("logoutBtn")?.addEventListener("click", async () => {
+        const { error } = await supabaseClient.auth.signOut();
+        if (error) showToast(error.message, "error");
+        showSignedOut();
+    });
+    document.addEventListener("click", (event) => {
+        const menu = document.getElementById("profileMenu");
+        if (menu && !menu.contains(event.target)) {
+            document.getElementById("profileDropdown").hidden = true;
+            document.getElementById("profileAvatar")?.setAttribute("aria-expanded", "false");
+        }
+    });
+}
 
 function apiUrl(path) {
     const base = (window.RAG_API_BASE_URL || "").replace(/\/$/, "");
@@ -74,6 +266,7 @@ function restoreWelcomeCard() {
             <div class="welcome-icon">
                 <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </div>
+            <p class="welcome-greeting" id="welcomeGreeting"></p>
             <h2>Ask anything about your PDF</h2>
             <p>Upload a resume, report, or manual — then get clear, tailored answers grounded in your document content.</p>
             <div class="how-it-works">
@@ -92,6 +285,7 @@ function restoreWelcomeCard() {
             </div>
         </div>
     `);
+    if (currentSession?.user) personalizeWelcome(currentSession.user);
 }
 
 function appendMessage(role, content, isError = false, sources = []) {
@@ -111,7 +305,12 @@ function appendMessage(role, content, isError = false, sources = []) {
     bubble.className = `message-bubble${isError ? " error" : ""}`;
 
     if (role === "bot" && !isError) {
-        bubble.innerHTML = marked.parse(content);
+        if (typeof marked !== "undefined" && window.DOMPurify?.sanitize) {
+            bubble.innerHTML = window.DOMPurify.sanitize(marked.parse(content));
+        } else {
+            // Keep authenticated sessions safe if a formatting CDN is unavailable.
+            bubble.textContent = content;
+        }
         const sourceControl = document.createElement("div");
         sourceControl.className = "source-control";
 
@@ -232,26 +431,40 @@ function addDocumentToList(filename, chunks) {
     const li = document.createElement("li");
     li.className = "doc-item";
     li.dataset.filename = filename;
-    li.innerHTML = `
-        <span class="doc-item-icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        </span>
-        <div class="doc-item-info">
-            <span class="doc-item-name" title="${filename}">${filename}</span>
-            <span class="doc-item-meta">${chunks ? chunks + " chunks indexed" : "Ready for questions"}</span>
-        </div>
-        <button class="doc-item-remove" data-remove="${encodeURIComponent(filename)}" title="Remove from session" aria-label="Remove document">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-    `;
+    const icon = document.createElement("span");
+    icon.className = "doc-item-icon";
+    icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+    const info = document.createElement("div");
+    info.className = "doc-item-info";
+    const name = document.createElement("span");
+    name.className = "doc-item-name";
+    name.title = filename;
+    name.textContent = filename;
+    const metadata = document.createElement("span");
+    metadata.className = "doc-item-meta";
+    metadata.textContent = chunks ? `${chunks} chunks indexed` : "Ready for questions";
+    info.append(name, metadata);
+    const remove = document.createElement("button");
+    remove.className = "doc-item-remove";
+    remove.type = "button";
+    remove.title = "Remove document from your account";
+    remove.setAttribute("aria-label", `Remove ${filename}`);
+    remove.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+    li.append(icon, info, remove);
     list.appendChild(li);
 
-    li.querySelector(".doc-item-remove")?.addEventListener("click", () => {
-        removeDocument(filename);
-    });
+    remove.addEventListener("click", () => removeDocument(filename));
 }
 
-function removeDocument(filename) {
+async function removeDocument(filename) {
+    try {
+        const response = await authorizedFetch(`/api/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not remove document.");
+    } catch (error) {
+        showToast(error.message || "Could not remove document.", "error");
+        return;
+    }
     uploadedFiles = uploadedFiles.filter((f) => f !== filename);
     document.querySelector(`.doc-item[data-filename="${CSS.escape(filename)}"]`)?.remove();
 
@@ -341,7 +554,7 @@ async function uploadFile() {
     formData.append("file", file);
 
     try {
-        const response = await fetch(apiUrl("/api/upload"), {
+        const response = await authorizedFetch("/api/upload", {
             method: "POST",
             body: formData,
         });
@@ -392,7 +605,7 @@ async function askQuestion() {
     sendBtn.disabled = true;
 
     try {
-        const response = await fetch(apiUrl("/api/chat"), {
+        const response = await authorizedFetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -472,6 +685,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     document.getElementById("sidebarToggle")?.addEventListener("click", () => toggleSidebar());
     document.getElementById("sidebarOverlay")?.addEventListener("click", () => toggleSidebar(false));
+    bindAuthControls();
+    initializeAuth();
 
     updateDocCount();
 });
